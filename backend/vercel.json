@@ -5,15 +5,15 @@
     "NODE_ENV": "production"
   },
   "functions": {
-    "index.js": {
+    "api/index.js": {
       "memory": 1024,
       "maxDuration": 30
     }
   },
-  "routes": [
+  "rewrites": [
     {
-      "src": "/(.*)",
-      "dest": "index.js"
+      "source": "/(.*)",
+      "destination": "/api"
     }
   ]
 }
