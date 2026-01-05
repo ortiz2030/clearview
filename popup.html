@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ClearView - AI Content Filter</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="container">
+    <!-- Header -->
+    <div class="header">
+      <h1 class="title">ClearView</h1>
+      <p class="subtitle">AI Content Filter</p>
+    </div>
+
+    <!-- Status Card -->
+    <div class="card status-card">
+      <div class="status-item">
+        <span class="status-label">Filter Status</span>
+        <div class="toggle-switch">
+          <input 
+            type="checkbox" 
+            id="filterToggle" 
+            class="toggle-input" 
+            checked
+          >
+          <label for="filterToggle" class="toggle-label">
+            <span class="toggle-indicator"></span>
+          </label>
+          <span id="statusText" class="status-indicator active">Active</span>
+        </div>
+      </div>
+
+      <div class="divider"></div>
+
+      <div class="status-item">
+        <span class="status-label">Daily AI Checks</span>
+        <div class="quota-display">
+          <span id="quotaCount" class="quota-number">45</span>
+          <span class="quota-text">/ 100 remaining</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Preferences Card -->
+    <div class="card preferences-card">
+      <h2 class="card-title">Filtering Preferences</h2>
+      
+      <label for="preferencesTextarea" class="input-label">
+        What type of content would you like to filter?
+      </label>
+      
+      <textarea
+        id="preferencesTextarea"
+        class="preferences-input"
+        placeholder="Example: Filter hateful content, misinformation, and spam..."
+        rows="4"
+      ></textarea>
+
+      <div class="button-group">
+        <button id="saveBtn" class="btn btn-primary">Save Preferences</button>
+        <button id="resetBtn" class="btn btn-secondary">Reset</button>
+      </div>
+
+      <p id="saveMessage" class="save-message"></p>
+    </div>
+
+    <!-- Actions Card -->
+    <div class="card actions-card">
+      <button id="upgradeBtn" class="btn btn-upgrade" disabled title="Coming soon">
+        Upgrade to Pro
+      </button>
+
+      <button id="settingsBtn" class="btn btn-tertiary">
+        Settings
+      </button>
+
+      <button id="feedbackBtn" class="btn btn-tertiary">
+        Send Feedback
+      </button>
+    </div>
+
+    <!-- Footer -->
+    <div class="footer">
+      <p>v1.0.0</p>
+      <a href="https://example.com" target="_blank" class="footer-link">Privacy Policy</a>
+    </div>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

@@ -1,0 +1,26 @@
+{
+  "name": "clearview-backend",
+  "version": "1.0.0",
+  "description": "ClearView - AI-powered content classification for Twitter/X",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node index.js",
+    "test": "node -e \"console.log('Tests not implemented yet')\""
+  },
+  "keywords": [
+    "content-classification",
+    "ai",
+    "chrome-extension",
+    "twitter"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "axios": "^1.13.2",
+    "express": "^4.18.2"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
