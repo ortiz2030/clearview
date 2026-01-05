@@ -136,19 +136,6 @@ app.use((req, res, next) => {
   next();
 });
 
-// Strip /api prefix for Vercel serverless function routing
-// When deployed on Vercel, requests are rewritten to /api/* and routed to api/index.js
-// This middleware strips the /api prefix so Express routes match correctly
-app.use((req, res, next) => {
-  if (req.path.startsWith('/api')) {
-    // Strip /api prefix, handling both /api/classify and /api cases
-    const newPath = req.path.replace(/^\/api\/?/, '') || '/';
-    req.url = req.url.replace(/^\/api\/?/, '') || '/';
-    req.path = newPath;
-  }
-  next();
-});
-
 // Body parser
 app.use(express.json({ limit: CONFIG.MAX_PAYLOAD_SIZE }));
 
