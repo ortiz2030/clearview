@@ -13,7 +13,7 @@
   "rewrites": [
     {
       "source": "/(.*)",
-      "destination": "/api/$1"
+      "destination": "/api"
     }
   ]
 }
