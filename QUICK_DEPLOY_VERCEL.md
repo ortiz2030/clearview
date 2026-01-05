@@ -157,20 +157,6 @@ window.CLEARVIEW_GET_STATS()
 
 ## Troubleshooting
 
-### Vercel Deployment Failed with "functions" Error
-```
-Error: The pattern "index.js" defined in `functions` doesn't match any Serverless Functions
-```
-**Fix**: The `vercel.json` has been corrected. Just redeploy:
-1. Go to Vercel dashboard
-2. Click your failed deployment
-3. Click the three dots (...) 
-4. Click "Redeploy"
-5. Wait 2-3 minutes
-6. Should succeed now ✅
-
-See `VERCEL_ERROR_FIX.md` for detailed explanation
-
 ### Vercel Deployment Failed
 1. Check "Build logs" in Vercel dashboard
 2. Common issues:
