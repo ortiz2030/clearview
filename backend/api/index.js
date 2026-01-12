@@ -15,11 +15,11 @@
  */
 
 const express = require('express');
-const aiModule = require('./ai');
-const authModule = require('./auth');
-const limitsModule = require('./limits');
-const cacheModule = require('./cache');
-const utils = require('./utils');
+const aiModule = require('../ai');
+const authModule = require('../auth');
+const limitsModule = require('../limits');
+const cacheModule = require('../cache');
+const utils = require('../utils');
 
 const app = express();
 
@@ -45,24 +45,24 @@ const CONFIG = {
  */
 function validatePost(post) {
   if (!post || typeof post !== 'object') return false;
-  
+
   const { hash, content } = post;
-  
+
   // Validate hash
   if (typeof hash !== 'string' || hash.length < 5 || hash.length > 100) {
     return false;
   }
-  
+
   // Validate content
   if (typeof content !== 'string' || content.length < 1 || content.length > CONFIG.MAX_TEXT_LENGTH) {
     return false;
   }
-  
+
   // Reject control characters
   if (/[\x00-\x08\x0B\x0C\x0E-\x1F]/.test(content)) {
     return false;
   }
-  
+
   return true;
 }
 
@@ -101,10 +101,14 @@ function validateClassifyRequest(body) {
 // CORS - Restrict to Chrome extensions only
 app.use((req, res, next) => {
   const origin = req.headers.origin || '';
-  
+
   // Check if origin matches allowed pattern
   const isAllowed = CONFIG.ALLOWED_ORIGINS.some(pattern => {
     if (pattern === '*') return true;
+    // Match chrome-extension://* pattern
+    if (pattern === 'chrome-extension://*' || pattern.includes('chrome-extension://')) {
+      return origin.startsWith('chrome-extension://');
+    }
     if (pattern.includes('*')) {
       const regex = new RegExp(`^${pattern.replace(/\*/g, '.*')}$`);
       return regex.test(origin);
@@ -114,9 +118,10 @@ app.use((req, res, next) => {
 
   if (isAllowed) {
     res.header('Access-Control-Allow-Origin', origin);
-    res.header('Access-Control-Allow-Methods', 'POST, OPTIONS');
+    res.header('Access-Control-Allow-Methods', 'POST, OPTIONS, GET');
     res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
     res.header('Access-Control-Max-Age', '86400');
+    res.header('Access-Control-Allow-Credentials', 'true');
   }
 
   if (req.method === 'OPTIONS') {
@@ -142,10 +147,10 @@ app.use(express.json({ limit: CONFIG.MAX_PAYLOAD_SIZE }));
 // Request logging & timeout
 app.use((req, res, next) => {
   const start = Date.now();
-  
+
   // Set timeout
   req.setTimeout(CONFIG.REQUEST_TIMEOUT_MS);
-  
+
   // Log on finish
   res.on('finish', () => {
     const duration = Date.now() - start;
@@ -160,7 +165,7 @@ app.use((req, res, next) => {
       }));
     }
   });
-  
+
   next();
 });
 
@@ -248,7 +253,7 @@ app.post('/auth', (req, res) => {
  */
 app.post('/classify', async (req, res) => {
   const startTime = Date.now();
-  
+
   try {
     // Authenticate
     const authResult = authModule.validateRequest(req);
@@ -282,7 +287,7 @@ app.post('/classify', async (req, res) => {
       // Try to downgrade request gracefully
       if (limitCheck.reason === 'QUOTA_EXCEEDED') {
         const downgraded = limitsModule.downgradeRequest(userId, posts.length, userTier);
-        
+
         if (downgraded === null) {
           return res.status(429).json({
             success: false,
@@ -316,7 +321,7 @@ app.post('/classify', async (req, res) => {
     for (const post of posts) {
       // Generate cache key: FNV-1a(postHash + preference)
       const cacheKey = cacheModule.generateKey(post.hash, preference);
-      
+
       // Check for cached result
       const cached = cacheModule.get(cacheKey);
       if (cached) {
@@ -369,21 +374,21 @@ app.post('/classify', async (req, res) => {
               }))
           )
         );
-        
+
         classifications.push(...inflightResults);
 
         // Classify new posts
         if (newPosts.length > 0) {
           // Create promise for inflight tracking
           const classifyPromise = aiModule.classifyBatch(preference, newPosts);
-          
+
           // Register inflight for first request (register key from first post)
           if (newPosts.length > 0) {
             cacheModule.registerInflight(newPosts[0].cacheKey, classifyPromise);
           }
 
           const aiResults = await classifyPromise;
-          
+
           for (const result of aiResults) {
             // Find original post by hash
             const post = newPosts.find(p => p.hash === result.hash);
@@ -398,7 +403,7 @@ app.post('/classify', async (req, res) => {
             cacheModule.set(post.cacheKey, {
               label: result.label,
             });
-            
+
             classifications.push({
               hash: result.hash,
               label: result.label,
@@ -408,7 +413,7 @@ app.post('/classify', async (req, res) => {
         }
       } catch (aiError) {
         console.error('[AI Error]', aiError.message);
-        
+
         // Fail-open: allow all uncached posts
         for (const post of uncachedPosts) {
           classifications.push({
@@ -445,7 +450,7 @@ app.post('/classify', async (req, res) => {
     });
   } catch (error) {
     console.error('[Classify Error]', error.message);
-    
+
     res.status(500).json({
       success: false,
       error: 'INTERNAL_ERROR',
@@ -473,7 +478,7 @@ app.get('/quota', (req, res) => {
     const tier = req.query.tier || 'free';
     const quota = limitsModule.getQuota(authResult.userId, tier);
     const tierDetails = limitsModule.getTierDetails(tier);
-    
+
     res.json({
       success: true,
       quota,
@@ -556,13 +561,15 @@ app.use((err, req, res, next) => {
 // Serverless Exports
 // ============================================================================
 
-// For AWS Lambda, Azure Functions, Google Cloud Functions
+// For Vercel: Export the Express app directly
+// Vercel automatically handles Express apps when exported from serverless functions
+// The app will be invoked by Vercel's runtime with proper req/res objects
 module.exports = app;
 
 // For local development
 if (require.main === module) {
   const PORT = process.env.PORT || 3000;
-  
+
   const server = app.listen(PORT, () => {
     console.log(JSON.stringify({
       timestamp: new Date().toISOString(),
@@ -578,7 +585,7 @@ if (require.main === module) {
       timestamp: new Date().toISOString(),
       event: 'SIGTERM_RECEIVED',
     }));
-    
+
     server.close(() => {
       console.log(JSON.stringify({
         timestamp: new Date().toISOString(),
