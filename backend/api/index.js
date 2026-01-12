@@ -36,6 +36,33 @@ const CONFIG = {
   ENABLE_METRICS: process.env.ENABLE_METRICS !== 'false',
 };
 
+// Structured logging helper
+function logAPI(level, message, data = {}) {
+  const logEntry = {
+    timestamp: new Date().toISOString(),
+    module: 'API',
+    level,
+    message,
+    ...data,
+  };
+
+  if (level === 'error') {
+    console.error(JSON.stringify(logEntry));
+  } else if (level === 'warn') {
+    console.warn(JSON.stringify(logEntry));
+  } else {
+    console.log(JSON.stringify(logEntry));
+  }
+}
+
+// Log environment on startup
+logAPI('info', 'API module loaded', {
+  nodeEnv: process.env.NODE_ENV,
+  hasOpenAIKey: !!process.env.OPENAI_API_KEY,
+  openAIKeyPrefix: process.env.OPENAI_API_KEY ? process.env.OPENAI_API_KEY.substring(0, 7) + '...' : 'NOT_SET',
+  allowedOrigins: CONFIG.ALLOWED_ORIGINS,
+});
+
 // ============================================================================
 // Security & Validation
 // ============================================================================
@@ -253,11 +280,32 @@ app.post('/auth', (req, res) => {
  */
 app.post('/classify', async (req, res) => {
   const startTime = Date.now();
+  const requestId = `classify_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+
+  logAPI('info', 'Classification request received', {
+    requestId,
+    origin: req.headers.origin,
+    contentLength: req.headers['content-length'],
+    hasAuth: !!req.headers.authorization,
+  });
 
   try {
     // Authenticate
     const authResult = authModule.validateRequest(req);
+
+    logAPI('info', 'Authentication result', {
+      requestId,
+      valid: authResult.valid,
+      userId: authResult.userId,
+      error: authResult.error,
+    });
+
     if (!authResult.valid) {
+      logAPI('warn', 'Authentication failed', {
+        requestId,
+        error: authResult.error,
+        authHeader: req.headers.authorization ? 'present' : 'missing',
+      });
       return res.status(401).json({
         success: false,
         error: 'INVALID_AUTH',
@@ -270,7 +318,20 @@ app.post('/classify', async (req, res) => {
 
     // Validate request body
     const validation = validateClassifyRequest(req.body);
+
+    logAPI('info', 'Request validation', {
+      requestId,
+      valid: validation.valid,
+      postsCount: req.body?.posts?.length,
+      hasPreference: !!req.body?.preference,
+      preferenceLength: req.body?.preference?.length,
+    });
+
     if (!validation.valid) {
+      logAPI('warn', 'Request validation failed', {
+        requestId,
+        error: validation.error,
+      });
       return res.status(400).json({
         success: false,
         error: 'INVALID_REQUEST',
@@ -279,16 +340,36 @@ app.post('/classify', async (req, res) => {
     }
 
     const { posts } = req.body;
-    const userTier = req.body.tier || 'free'; // Allow client to specify tier
+    const userTier = req.body.tier || 'free';
 
     // Check rate limit
     const limitCheck = limitsModule.checkLimit(userId, userTier, posts.length);
+
+    logAPI('info', 'Rate limit check', {
+      requestId,
+      userId,
+      tier: userTier,
+      postsCount: posts.length,
+      allowed: limitCheck.allowed,
+      reason: limitCheck.reason,
+    });
+
     if (!limitCheck.allowed) {
-      // Try to downgrade request gracefully
       if (limitCheck.reason === 'QUOTA_EXCEEDED') {
         const downgraded = limitsModule.downgradeRequest(userId, posts.length, userTier);
 
+        logAPI('info', 'Attempting request downgrade', {
+          requestId,
+          originalCount: posts.length,
+          downgradedTo: downgraded,
+        });
+
         if (downgraded === null) {
+          logAPI('warn', 'No quota remaining', {
+            requestId,
+            userId,
+            retryAfterMs: limitCheck.retryAfterMs,
+          });
           return res.status(429).json({
             success: false,
             error: limitCheck.reason,
@@ -298,9 +379,13 @@ app.post('/classify', async (req, res) => {
           });
         }
 
-        // Downgrade to available quota
         req.body.posts = posts.slice(0, downgraded);
       } else {
+        logAPI('warn', 'Rate limit exceeded', {
+          requestId,
+          userId,
+          reason: limitCheck.reason,
+        });
         return res.status(429).json({
           success: false,
           error: limitCheck.reason,
@@ -310,8 +395,14 @@ app.post('/classify', async (req, res) => {
       }
     }
 
-    // Get user preference from request (optional, default to generic)
+    // Get user preference from request
     const preference = req.body.preference || 'Filter harmful, explicit, and abusive content';
+
+    logAPI('info', 'Starting classification', {
+      requestId,
+      postsCount: posts.length,
+      preference: preference.substring(0, 100),
+    });
 
     // Separate cached and uncached posts
     const classifications = [];
@@ -319,10 +410,7 @@ app.post('/classify', async (req, res) => {
     const cacheHits = [];
 
     for (const post of posts) {
-      // Generate cache key: FNV-1a(postHash + preference)
       const cacheKey = cacheModule.generateKey(post.hash, preference);
-
-      // Check for cached result
       const cached = cacheModule.get(cacheKey);
       if (cached) {
         classifications.push({
@@ -332,77 +420,75 @@ app.post('/classify', async (req, res) => {
         });
         cacheHits.push(post.hash);
       } else {
-        // Check for inflight request (concurrent deduplication)
         const inflight = cacheModule.getInflight(cacheKey);
         if (inflight) {
-          // Wait for concurrent request to finish
-          uncachedPosts.push({
-            ...post,
-            cacheKey,
-            inflight,
-          });
+          uncachedPosts.push({ ...post, cacheKey, inflight });
         } else {
-          uncachedPosts.push({
-            ...post,
-            cacheKey,
-          });
+          uncachedPosts.push({ ...post, cacheKey });
         }
       }
     }
 
+    logAPI('info', 'Cache lookup complete', {
+      requestId,
+      totalPosts: posts.length,
+      cacheHits: cacheHits.length,
+      uncachedCount: uncachedPosts.length,
+    });
+
     // Classify uncached posts with user preference
     if (uncachedPosts.length > 0) {
+      logAPI('info', 'Calling AI module for classification', {
+        requestId,
+        uncachedCount: uncachedPosts.length,
+        newPosts: uncachedPosts.filter(p => !p.inflight).length,
+        inflightPosts: uncachedPosts.filter(p => p.inflight).length,
+      });
+
       try {
-        // Separate posts with inflight vs new requests
         const newPosts = uncachedPosts.filter(p => !p.inflight);
         const inflightPosts = uncachedPosts.filter(p => p.inflight);
 
-        // Wait for inflight requests to complete
         const inflightResults = await Promise.all(
           inflightPosts.map(p =>
             p.inflight
-              .then(result => ({
-                hash: p.hash,
-                label: result.label,
-                cached: true,
-              }))
-              .catch(() => ({
-                hash: p.hash,
-                label: aiModule.LABELS.ALLOW,
-                cached: false,
-                failedOpen: true,
-              }))
+              .then(result => ({ hash: p.hash, label: result.label, cached: true }))
+              .catch(() => ({ hash: p.hash, label: aiModule.LABELS.ALLOW, cached: false, failedOpen: true }))
           )
         );
 
         classifications.push(...inflightResults);
 
-        // Classify new posts
         if (newPosts.length > 0) {
-          // Create promise for inflight tracking
+          logAPI('info', 'Sending posts to AI classifier', {
+            requestId,
+            newPostsCount: newPosts.length,
+          });
+
           const classifyPromise = aiModule.classifyBatch(preference, newPosts);
 
-          // Register inflight for first request (register key from first post)
           if (newPosts.length > 0) {
             cacheModule.registerInflight(newPosts[0].cacheKey, classifyPromise);
           }
 
           const aiResults = await classifyPromise;
 
+          logAPI('info', 'AI classification results received', {
+            requestId,
+            resultsCount: aiResults.length,
+            failedOpen: aiResults.filter(r => r.failedOpen).length,
+            blocked: aiResults.filter(r => r.label === 'BLOCK').length,
+          });
+
           for (const result of aiResults) {
-            // Find original post by hash
             const post = newPosts.find(p => p.hash === result.hash);
             if (!post) continue;
 
-            // Validate result structure
             if (!aiModule.validateResult(result)) {
-              result.label = aiModule.LABELS.ALLOW; // Fail-open
+              result.label = aiModule.LABELS.ALLOW;
             }
 
-            // Cache result with preference-aware key
-            cacheModule.set(post.cacheKey, {
-              label: result.label,
-            });
+            cacheModule.set(post.cacheKey, { label: result.label });
 
             classifications.push({
               hash: result.hash,
@@ -412,9 +498,12 @@ app.post('/classify', async (req, res) => {
           }
         }
       } catch (aiError) {
-        console.error('[AI Error]', aiError.message);
+        logAPI('error', 'AI classification error', {
+          requestId,
+          error: aiError.message,
+          uncachedCount: uncachedPosts.length,
+        });
 
-        // Fail-open: allow all uncached posts
         for (const post of uncachedPosts) {
           classifications.push({
             hash: post.hash,
@@ -436,6 +525,21 @@ app.post('/classify', async (req, res) => {
 
     const duration = Date.now() - startTime;
 
+    const blockedCount = sorted.filter(c => c?.label === 'BLOCK').length;
+    const failedOpenCount = sorted.filter(c => c?.failedOpen).length;
+
+    logAPI('info', 'Classification request completed', {
+      requestId,
+      durationMs: duration,
+      totalPosts: req.body.posts.length,
+      cached: cacheHits.length,
+      classified: uncachedPosts.length,
+      blocked: blockedCount,
+      allowed: sorted.length - blockedCount,
+      failedOpen: failedOpenCount,
+      quotaRemaining: quotaAfter?.remaining,
+    });
+
     res.json({
       success: true,
       timestamp: new Date().toISOString(),
@@ -449,7 +553,14 @@ app.post('/classify', async (req, res) => {
       },
     });
   } catch (error) {
-    console.error('[Classify Error]', error.message);
+    const duration = Date.now() - startTime;
+
+    logAPI('error', 'Classification request failed', {
+      requestId,
+      durationMs: duration,
+      error: error.message,
+      stack: error.stack,
+    });
 
     res.status(500).json({
       success: false,

@@ -21,9 +21,37 @@ const CONFIG = {
   API_KEY: process.env.OPENAI_API_KEY,
 };
 
+// Enhanced logging helper
+function logAI(level, message, data = {}) {
+  const logEntry = {
+    timestamp: new Date().toISOString(),
+    module: 'AI',
+    level,
+    message,
+    ...data,
+  };
+
+  if (level === 'error') {
+    console.error(JSON.stringify(logEntry));
+  } else if (level === 'warn') {
+    console.warn(JSON.stringify(logEntry));
+  } else {
+    console.log(JSON.stringify(logEntry));
+  }
+}
+
 // Validate API key on module load
 if (!CONFIG.API_KEY) {
-  console.warn('[AI] WARNING: OPENAI_API_KEY not set in environment variables');
+  logAI('warn', 'OPENAI_API_KEY not set in environment variables', {
+    hasKey: false,
+    envKeys: Object.keys(process.env).filter(k => k.includes('OPENAI') || k.includes('API')),
+  });
+} else {
+  logAI('info', 'OpenAI API key configured', {
+    hasKey: true,
+    keyPrefix: CONFIG.API_KEY.substring(0, 7) + '...',
+    keyLength: CONFIG.API_KEY.length,
+  });
 }
 
 // Output labels
@@ -94,10 +122,10 @@ function parseResponse(responseText, posts) {
   for (let i = 0; i < posts.length; i++) {
     const post = posts[i];
     const line = (lines[i] || '').trim().toUpperCase();
-    
+
     // Validate output
     const label = (line === LABELS.BLOCK) ? LABELS.BLOCK : LABELS.ALLOW;
-    
+
     results.push({
       hash: post.hash,
       label,
@@ -116,18 +144,38 @@ function parseResponse(responseText, posts) {
  * @returns {Promise<Array>} Array of {hash, label}
  */
 async function classifyBatch(preference, posts) {
+  const requestId = `req_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+  const startTime = Date.now();
+
+  logAI('info', 'Classification request started', {
+    requestId,
+    postsCount: posts?.length || 0,
+    preferenceLength: preference?.length || 0,
+    hasApiKey: !!CONFIG.API_KEY,
+  });
+
   // Input validation
   if (!Array.isArray(posts) || posts.length === 0) {
+    logAI('warn', 'Empty or invalid posts array', { requestId });
     return [];
   }
 
   if (posts.length > CONFIG.MAX_BATCH_SIZE) {
+    logAI('info', 'Truncating posts to max batch size', {
+      requestId,
+      original: posts.length,
+      truncatedTo: CONFIG.MAX_BATCH_SIZE,
+    });
     posts = posts.slice(0, CONFIG.MAX_BATCH_SIZE);
   }
 
   // Check API key
   if (!CONFIG.API_KEY) {
-    console.error('[AI] OPENAI_API_KEY not configured');
+    logAI('error', 'OPENAI_API_KEY not configured - failing open', {
+      requestId,
+      postsCount: posts.length,
+      envVars: Object.keys(process.env).length,
+    });
     CIRCUIT_BREAKER.recordFailure();
     return posts.map(p => ({
       hash: p.hash,
@@ -139,7 +187,11 @@ async function classifyBatch(preference, posts) {
 
   // Fail-open if circuit breaker is open
   if (CIRCUIT_BREAKER.isOpen) {
-    console.warn('[AI] Circuit breaker open, returning ALLOW for all');
+    logAI('warn', 'Circuit breaker open - failing open', {
+      requestId,
+      failures: CIRCUIT_BREAKER.failures,
+      postsCount: posts.length,
+    });
     return posts.map(p => ({
       hash: p.hash,
       label: LABELS.ALLOW,
@@ -167,13 +219,18 @@ async function classifyBatch(preference, posts) {
       max_tokens: maxTokens,
     };
 
-    console.debug('[AI] Calling OpenAI API', {
+    logAI('info', 'Calling OpenAI API', {
+      requestId,
       model: CONFIG.MODEL,
-      posts: posts.length,
+      postsCount: posts.length,
       maxTokens,
       endpoint: CONFIG.MODEL_ENDPOINT,
+      systemPromptLength: systemPrompt.length,
+      userPromptLength: userPrompt.length,
+      timeoutMs: CONFIG.MODEL_TIMEOUT_MS,
     });
 
+    const apiStartTime = Date.now();
     const response = await axios.post(CONFIG.MODEL_ENDPOINT, requestPayload, {
       headers: {
         'Authorization': `Bearer ${CONFIG.API_KEY}`,
@@ -181,16 +238,41 @@ async function classifyBatch(preference, posts) {
       },
       timeout: CONFIG.MODEL_TIMEOUT_MS,
     });
+    const apiDuration = Date.now() - apiStartTime;
+
+    logAI('info', 'OpenAI API response received', {
+      requestId,
+      status: response.status,
+      statusText: response.statusText,
+      apiDurationMs: apiDuration,
+      hasChoices: !!response.data?.choices,
+      choicesCount: response.data?.choices?.length || 0,
+      usage: response.data?.usage,
+    });
 
     // Validate response structure
     if (!response.data || !response.data.choices || !Array.isArray(response.data.choices)) {
+      logAI('error', 'Invalid OpenAI API response structure', {
+        requestId,
+        hasData: !!response.data,
+        hasChoices: !!response.data?.choices,
+        dataKeys: response.data ? Object.keys(response.data) : [],
+      });
       throw new Error('Invalid OpenAI API response structure');
     }
 
     // Parse response
     const content = response.data.choices[0]?.message?.content || '';
-    
+
+    logAI('debug', 'OpenAI response content', {
+      requestId,
+      contentLength: content.length,
+      contentPreview: content.substring(0, 200),
+      finishReason: response.data.choices[0]?.finish_reason,
+    });
+
     if (!content || content.trim().length === 0) {
+      logAI('error', 'Empty response from OpenAI API', { requestId });
       throw new Error('Empty response from OpenAI API');
     }
 
@@ -198,34 +280,72 @@ async function classifyBatch(preference, posts) {
 
     // Validate we got results for all posts
     if (results.length !== posts.length) {
-      console.warn(`[AI] Response count mismatch: expected ${posts.length}, got ${results.length}`);
+      logAI('warn', 'Response count mismatch', {
+        requestId,
+        expected: posts.length,
+        got: results.length,
+      });
     }
+
+    const totalDuration = Date.now() - startTime;
+    const blockCount = results.filter(r => r.label === LABELS.BLOCK).length;
+
+    logAI('info', 'Classification completed successfully', {
+      requestId,
+      totalDurationMs: totalDuration,
+      postsCount: posts.length,
+      resultsCount: results.length,
+      blockCount,
+      allowCount: results.length - blockCount,
+    });
 
     CIRCUIT_BREAKER.recordSuccess();
     return results;
 
   } catch (error) {
-    // Enhanced error logging
+    const totalDuration = Date.now() - startTime;
+
+    // Enhanced error logging with full context
     const errorDetails = {
+      requestId,
       message: error.message,
       code: error.code,
-      posts: posts.length,
+      postsCount: posts.length,
+      totalDurationMs: totalDuration,
+      circuitBreakerFailures: CIRCUIT_BREAKER.failures,
     };
 
     // Log OpenAI API error response if available
     if (error.response) {
+      errorDetails.type = 'API_ERROR';
       errorDetails.status = error.response.status;
       errorDetails.statusText = error.response.statusText;
-      errorDetails.data = error.response.data;
-      console.error('[AI Classification Error] OpenAI API Error:', errorDetails);
+      errorDetails.apiError = error.response.data?.error;
+      errorDetails.apiErrorMessage = error.response.data?.error?.message;
+      errorDetails.apiErrorType = error.response.data?.error?.type;
+      errorDetails.apiErrorCode = error.response.data?.error?.code;
+
+      logAI('error', 'OpenAI API returned error', errorDetails);
     } else if (error.request) {
+      errorDetails.type = 'NETWORK_ERROR';
       errorDetails.requestError = 'No response received from OpenAI API';
-      console.error('[AI Classification Error] Network Error:', errorDetails);
+      errorDetails.timeout = error.code === 'ECONNABORTED';
+
+      logAI('error', 'Network error calling OpenAI API', errorDetails);
     } else {
-      console.error('[AI Classification Error]', errorDetails);
+      errorDetails.type = 'REQUEST_SETUP_ERROR';
+      errorDetails.stack = error.stack;
+
+      logAI('error', 'Error setting up OpenAI API request', errorDetails);
     }
 
     CIRCUIT_BREAKER.recordFailure();
+
+    logAI('warn', 'Failing open - returning ALLOW for all posts', {
+      requestId,
+      postsCount: posts.length,
+      circuitBreakerOpen: CIRCUIT_BREAKER.isOpen,
+    });
 
     // Fail-open: return ALLOW for all posts on error
     return posts.map(p => ({
